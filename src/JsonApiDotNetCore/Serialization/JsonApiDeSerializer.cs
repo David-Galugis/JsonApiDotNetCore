@@ -121,7 +121,11 @@ namespace JsonApiDotNetCore.Serialization
             var entity = Activator.CreateInstance(contextEntity.EntityType);
 
             entity = SetEntityAttributes(entity, contextEntity, data.Attributes);
-            entity = SetRelationships(entity, contextEntity, data.Relationships, included);
+            entity = SetRelationships(entity,
+                contextEntity,
+                data.Relationships,
+                included,
+                this._jsonApiContext?.QuerySet?.IncludedRelationships);
 
             var identifiableEntity = (IIdentifiable)entity;
 
@@ -175,7 +179,8 @@ namespace JsonApiDotNetCore.Serialization
             object entity,
             ContextEntity contextEntity,
             Dictionary<string, RelationshipData> relationships,
-            List<ResourceObject> included = null)
+            List<ResourceObject> included = null,
+            List<string> includePaths = null)
         {
             if (relationships == null || relationships.Count == 0)
                 return entity;
@@ -184,9 +189,14 @@ namespace JsonApiDotNetCore.Serialization
 
             foreach (var attr in contextEntity.Relationships)
             {
-                entity = attr.IsHasOne
-                    ? SetHasOneRelationship(entity, entityProperties, (HasOneAttribute)attr, contextEntity, relationships, included)
-                    : SetHasManyRelationship(entity, entityProperties, (HasManyAttribute)attr, contextEntity, relationships, included);
+                var paths = includePaths?.Where(x => x.Equals(attr.PublicRelationshipName) || x.StartsWith($"{attr.PublicRelationshipName}."))
+                    .ToList();
+                if (paths != null && paths.Count > 0)
+                {
+                    entity = attr.IsHasOne
+                        ? SetHasOneRelationship(entity, entityProperties, (HasOneAttribute)attr, contextEntity, relationships, included, paths)
+                        : SetHasManyRelationship(entity, entityProperties, (HasManyAttribute)attr, contextEntity, relationships, included, paths);
+                }
             }
 
             return entity;
@@ -197,7 +207,8 @@ namespace JsonApiDotNetCore.Serialization
             HasOneAttribute attr,
             ContextEntity contextEntity,
             Dictionary<string, RelationshipData> relationships,
-            List<ResourceObject> included = null)
+            List<ResourceObject> included = null,
+            List<string> includePaths = null)
         {
             var relationshipName = attr.PublicRelationshipName;
 
@@ -225,7 +236,15 @@ namespace JsonApiDotNetCore.Serialization
                 {
                     var includedResource = included.SingleOrDefault(r => r.Type == rio.Type && r.Id == rio.Id);
                     if (includedResource != null)
-                        SetRelationships(navigationPropertyValue, resourceGraphEntity, includedResource.Relationships, included);
+                    {
+                        var paths = includePaths?.Select(x =>
+                        {
+                            var tmp = x.Split('.').ToList();
+                            tmp.RemoveAt(0);
+                            return string.Join(".", tmp);
+                        }).ToList();
+                        SetRelationships(navigationPropertyValue, resourceGraphEntity, includedResource.Relationships, included, paths);
+                    }
                 }
             }
 
@@ -269,7 +288,10 @@ namespace JsonApiDotNetCore.Serialization
             {
                 // we have now set the FK property on the resource, now we need to check to see if the
                 // related entity was included in the payload and update its attributes
-                var includedRelationshipObject = GetIncludedRelationship(rio, included, hasOneAttr);
+                var includedRelationshipObject = GetIncludedRelationship(rio,
+                    included,
+                    hasOneAttr);
+
                 if (includedRelationshipObject != null)
                     hasOneAttr.SetValue(entity, includedRelationshipObject);
 
@@ -287,7 +309,8 @@ namespace JsonApiDotNetCore.Serialization
             HasManyAttribute attr,
             ContextEntity contextEntity,
             Dictionary<string, RelationshipData> relationships,
-            List<ResourceObject> included = null)
+            List<ResourceObject> included = null,
+            List<string> includePaths = null)
         {
             var relationshipName = attr.PublicRelationshipName;
 
@@ -298,7 +321,16 @@ namespace JsonApiDotNetCore.Serialization
 
                 var relatedResources = relationshipData.ManyData.Select(r =>
                 {
-                    var instance = GetIncludedRelationship(r, included, attr);
+                    var paths = includePaths?.Select(x =>
+                    {
+                        var tmp = x.Split('.').ToList();
+                        tmp.RemoveAt(0);
+                        return string.Join(".", tmp);
+                    }).ToList();
+                    var instance = GetIncludedRelationship(r,
+                        included,
+                        attr,
+                        paths);
                     return instance;
                 });
 
@@ -316,7 +348,10 @@ namespace JsonApiDotNetCore.Serialization
             return entity;
         }
 
-        private IIdentifiable GetIncludedRelationship(ResourceIdentifierObject relatedResourceIdentifier, List<ResourceObject> includedResources, RelationshipAttribute relationshipAttr)
+        private IIdentifiable GetIncludedRelationship(ResourceIdentifierObject relatedResourceIdentifier,
+            List<ResourceObject> includedResources,
+            RelationshipAttribute relationshipAttr,
+            List<string> includePaths = null)
         {
             // at this point we can be sure the relationshipAttr.Type is IIdentifiable because we were able to successfully build the ResourceGraph
             var relatedInstance = relationshipAttr.DependentType.New<IIdentifiable>();
@@ -336,6 +371,12 @@ namespace JsonApiDotNetCore.Serialization
 
             SetEntityAttributes(relatedInstance, contextEntity, includedResource.Attributes);
 
+            
+            var tmp = includedResources.FirstOrDefault(x => x.Id.Equals(relatedResourceIdentifier.Id));
+            if(tmp != null)
+            {
+                relatedInstance = SetRelationships(relatedInstance, contextEntity, tmp.Relationships, includedResources, includePaths) as IIdentifiable;
+            }
             return relatedInstance;
         }
 
