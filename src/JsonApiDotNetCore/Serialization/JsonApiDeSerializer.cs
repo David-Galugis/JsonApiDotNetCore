@@ -371,8 +371,7 @@ namespace JsonApiDotNetCore.Serialization
 
             SetEntityAttributes(relatedInstance, contextEntity, includedResource.Attributes);
 
-            
-            var tmp = includedResources.FirstOrDefault(x => x.Id.Equals(relatedResourceIdentifier.Id));
+            var tmp = includedResources.FirstOrDefault(x => x.Id.Equals(relatedResourceIdentifier.Id) && x.Type.Equals(relatedResourceIdentifier.Type));
             if(tmp != null)
             {
                 relatedInstance = SetRelationships(relatedInstance, contextEntity, tmp.Relationships, includedResources, includePaths) as IIdentifiable;
