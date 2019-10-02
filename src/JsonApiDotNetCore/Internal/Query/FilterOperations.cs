@@ -13,6 +13,8 @@ namespace JsonApiDotNetCore.Internal.Query
         @in = 7, // prefix with @ to use keyword
         nin = 8,
         isnull = 9,
-        isnotnull = 10
+        isnotnull = 10,
+        all = 11,
+        exclude = 12
     }
 }
