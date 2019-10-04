@@ -15,6 +15,8 @@ namespace JsonApiDotNetCore.Internal.Query
         isnull = 9,
         isnotnull = 10,
         all = 11,
-        exclude = 12
+        exclude = 12,
+        sw = 13,//StartWith,
+        ew = 14,//EndWith
     }
 }
