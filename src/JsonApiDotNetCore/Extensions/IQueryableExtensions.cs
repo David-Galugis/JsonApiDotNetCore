@@ -30,6 +30,75 @@ namespace JsonApiDotNetCore.Extensions
             }
         }
 
+        private static MethodInfo _anyMethod;
+        private static MethodInfo AnyMethod
+        {
+            get
+            {
+                if (_anyMethod == null)
+                {
+                    _anyMethod = typeof(System.Linq.Enumerable)
+                        .GetMethods()
+                        .First(mi => mi.Name.Equals(nameof(System.Linq.Enumerable.Any)) && mi.GetParameters().Count() == 2);
+                }
+                return _anyMethod;
+            }
+        }
+        private static MethodInfo _allMethod;
+        private static MethodInfo AllMethod
+        {
+            get
+            {
+                if (_allMethod == null)
+                {
+                    _allMethod = typeof(System.Linq.Enumerable)
+                        .GetMethods()
+                        .First(mi => mi.Name.Equals(nameof(System.Linq.Enumerable.All)));
+                }
+                return _allMethod;
+            }
+        }
+
+        private static MethodInfo _anyPredicate;
+        private static MethodInfo AnyPredicate
+        {
+            get
+            {
+                if (_anyPredicate == null)
+                {
+                    _anyPredicate = typeof(IQueryableExtensions)
+                        .GetMethod(nameof(IQueryableExtensions.BuildAnyPredicate), BindingFlags.NonPublic | BindingFlags.Static);
+                }
+                return _anyPredicate;
+            }
+        }
+        private static MethodInfo _allPredicate;
+        private static MethodInfo AllPredicate
+        {
+            get
+            {
+                if (_allPredicate == null)
+                {
+                    _allPredicate = typeof(IQueryableExtensions)
+                        .GetMethod(nameof(IQueryableExtensions.BuildAllPredicate), BindingFlags.NonPublic | BindingFlags.Static);
+                }
+                return _allPredicate;
+            }
+        }
+        private static MethodInfo _buildSelectMethod;
+        private static MethodInfo BuildSelectMethod
+        {
+            get
+            {
+                if (_buildSelectMethod == null)
+                {
+                    _buildSelectMethod = typeof(IQueryableExtensions)
+                        .GetMethod(nameof(IQueryableExtensions.BuildSelectMethod), BindingFlags.NonPublic | BindingFlags.Static);
+                }
+                return _buildSelectMethod;
+            }
+        }
+
         public static IQueryable<TSource> Sort<TSource>(this IQueryable<TSource> source, IJsonApiContext jsonApiContext, List<SortQuery> sortQueries)
         {
             if (sortQueries == null || sortQueries.Count == 0)
@@ -130,10 +199,18 @@ namespace JsonApiDotNetCore.Extensions
             if (filterQuery == null)
                 return source;
 
+            if (filterQuery.FilterOperation == FilterOperations.all
+                || filterQuery.FilterOperation == FilterOperations._all_
+                || filterQuery.FilterOperation == FilterOperations.exclude)
+            {
+                return CallGenericWhereAllMethod(source, filterQuery);
+            }
             if (filterQuery.FilterOperation == FilterOperations.@in || filterQuery.FilterOperation == FilterOperations.nin)
+            {
                 return CallGenericWhereContainsMethod(source, filterQuery);
-            else
-                return CallGenericWhereMethod(source, filterQuery);
+            }
+
+            return CallGenericWhereMethod(source, filterQuery);
         }
 
         private static Expression GetFilterExpressionLambda(Expression left, Expression right, FilterOperations operation)
@@ -161,9 +238,9 @@ namespace JsonApiDotNetCore.Extensions
                     // {model.Id >= 1}
                     body = Expression.GreaterThanOrEqual(left, right);
                     break;
-                case FilterOperations.like:
-                    body = Expression.Call(left, "Contains", null, right);
-                    break;
+                //case FilterOperations.like:
+                //    body = Expression.Call(left, "Contains", null, right);
+                //    break;
                 // {model.Id != 1}
                 case FilterOperations.ne:
                     body = Expression.NotEqual(left, right);
@@ -176,11 +253,72 @@ namespace JsonApiDotNetCore.Extensions
                     // {model.Id == null}
                     body = Expression.Equal(left, right);
                     break;
+                case FilterOperations.sw:
+                case FilterOperations.ew:
+                case FilterOperations.like:
+                    string method;
+                    if (operation == FilterOperations.sw)
+                    {
+                        method = nameof(string.StartsWith);
+                    }
+                    else if (operation == FilterOperations.ew)
+                    {
+                        method = nameof(string.EndsWith);
+                    }
+                    else
+                    {
+                        method = nameof(string.Contains);
+                    }
+
+                    body = Expression.Call(left, method, null, right);
+                    break;
                 default:
                     throw new JsonApiException(500, $"Unknown filter operation {operation}");
             }
 
             return body;
+        }
+
+        private static IQueryable<TSource> CallGenericWhereAllMethod<TSource>(IQueryable<TSource> source, BaseFilterQuery filter)
+        {
+            var concreteType = typeof(TSource);
+            var property = concreteType.GetProperty(filter.Attribute.InternalAttributeName);
+
+            try
+            {
+                var propertyValues = filter.PropertyValue.Split(QueryConstants.COMMA);
+                ParameterExpression entity = Expression.Parameter(concreteType, "x");
+                MemberExpression member;
+                if (filter.IsAttributeOfRelationship)
+                {
+                    var relation = Expression.PropertyOrField(entity, filter.Relationship.InternalRelationshipName);
+
+                    // Intercept the call if the relationship is type of "HasMany"
+                    if (typeof(IEnumerable).IsAssignableFrom(relation.Type))
+                    {
+                        // Create the lambda using "All" extension method
+                        var lambda = BuildAllCall<TSource>(entity,
+                            relation,
+                            relation.Type.GenericTypeArguments[0],
+                            filter);
+                        //var lambda = Expression.Lambda<Func<TSource, bool>>(callExpr, entity);
+
+                        return source.Where(lambda);
+                    }
+
+                    member = Expression.Property(relation, filter.Attribute.InternalAttributeName);
+                }
+                else
+                    throw new JsonApiException(400, $" the operator \"{filter.FilterOperation.ToString()}\" can only affect a \"HasMany\" relationship");
+
+
+
+                return null;
+            }
+            catch (FormatException)
+            {
+                throw new JsonApiException(400, $"Could not cast {filter.PropertyValue} to {property.PropertyType.Name}");
+            }
         }
 
         private static IQueryable<TSource> CallGenericWhereContainsMethod<TSource>(IQueryable<TSource> source, BaseFilterQuery filter)
@@ -196,6 +334,18 @@ namespace JsonApiDotNetCore.Extensions
                 if (filter.IsAttributeOfRelationship)
                 {
                     var relation = Expression.PropertyOrField(entity, filter.Relationship.InternalRelationshipName);
+
+                    // Intercept the call if the relationship is type of "HasMany"
+                    if (typeof(IEnumerable).IsAssignableFrom(relation.Type))
+                    {
+                        // Create the lambda using "Any" extension method
+                        var callExpr = BuildAnyCall(relation,
+                            relation.Type.GenericTypeArguments[0],
+                            filter);
+                        var lambda = Expression.Lambda<Func<TSource, bool>>(callExpr, entity);
+                        return source.Where(lambda);
+                    }
+
                     member = Expression.Property(relation, filter.Attribute.InternalAttributeName);
                 }
                 else
@@ -212,7 +362,7 @@ namespace JsonApiDotNetCore.Extensions
 
                     return source.Where(lambda);
                 }
-                else
+                if (filter.FilterOperation == FilterOperations.nin)
                 {
                     // Where(i => !arr.Contains(i.column))
                     var notContains = Expression.Not(Expression.Call(method, new Expression[] { Expression.Constant(obj), member }));
@@ -220,6 +370,15 @@ namespace JsonApiDotNetCore.Extensions
 
                     return source.Where(lambda);
                 }
+                //if (filter.FilterOperation == FilterOperations.all)
+                //{
+                //    // Where(i => !arr.Contains(i.column))
+                //    var notContains = Expression.Not(Expression.Call(method, new Expression[] { Expression.(obj), member }));
+                //    var lambda = Expression.Lambda<Func<TSource, bool>>(notContains, entity);
+
+                //    return source.Where(lambda);
+                //}
+                return null;
             }
             catch (FormatException)
             {
@@ -259,6 +418,19 @@ namespace JsonApiDotNetCore.Extensions
                     throw new ArgumentException($"'{filter.Attribute.InternalAttributeName}' is not a valid attribute of '{filter.Relationship.InternalRelationshipName}'");
 
                 var leftRelationship = Expression.PropertyOrField(parameter, filter.Relationship.InternalRelationshipName);
+
+                // Intercept the call if the relationship is type of "HasMany"
+                if (typeof(IEnumerable).IsAssignableFrom(leftRelationship.Type))
+                {
+                    // Create the lambda using "Any" extension method
+                    var callExpr = BuildAnyCall(leftRelationship,
+                        relatedType,
+                        filter);
+                    var lambda = Expression.Lambda<Func<TSource, bool>>(callExpr, parameter);
+                    return source.Where(lambda);
+                }
+
+
                 // {model.Relationship}
                 left = Expression.PropertyOrField(leftRelationship, property.Name);
             }
@@ -279,11 +451,24 @@ namespace JsonApiDotNetCore.Extensions
                     right = Expression.Constant(null);
                 else
                 {
-                    // convert the incoming value to the target value type
-                    // "1" -> 1
-                    var convertedValue = TypeHelper.ConvertType(filter.PropertyValue, property.PropertyType);
-                    // {1}
-                    right = Expression.Constant(convertedValue, property.PropertyType);
+
+                    // "Like" or "StartWith" or "EndWith" only apply on "string" values
+                    if (op == FilterOperations.like || op == FilterOperations.sw || op == FilterOperations.ew)
+                    {
+                        right = Expression.Constant(filter.PropertyValue, typeof(string));
+                        source = source.Where(Expression.Lambda<Func<TSource, bool>>(
+                            GetFilterExpressionLambda(left, right, FilterOperations.isnotnull),
+                            parameter)
+                            );
+                    }
+                    else
+                    {
+                        // convert the incoming value to the target value type
+                        // "1" -> 1
+                        var convertedValue = TypeHelper.ConvertType(filter.PropertyValue, property.PropertyType);
+                        // {1}
+                        right = Expression.Constant(convertedValue, property.PropertyType);
+                    }
                 }
 
                 var body = GetFilterExpressionLambda(left, right, filter.FilterOperation);
@@ -294,6 +479,167 @@ namespace JsonApiDotNetCore.Extensions
             catch (FormatException)
             {
                 throw new JsonApiException(400, $"Could not cast {filter.PropertyValue} to {property.PropertyType.Name}");
+            }
+        }
+
+
+        static Expression<Func<TSource, bool>> BuildAllCall<TSource>(
+            ParameterExpression x_parameter,
+            MemberExpression ienumerableMember,
+            Type relatedType,
+            BaseFilterQuery filter
+            )
+        {
+            var z_parameter = Expression.Parameter(relatedType, "z");
+            var z_member = Expression.Property(z_parameter, filter.Attribute.InternalAttributeName);
+            var propertyValues = filter.PropertyValue.Split(QueryConstants.COMMA);
+            var obj = TypeHelper.ConvertListType(propertyValues, z_member.Type);
+            var tmp_variable = Expression.Parameter(obj.GetType(), "tmp");
+            var y_parameter = Expression.Parameter(z_member.Type, "y");
+
+            var tmp = Expression.Constant(obj);
+
+            var selectCall = Expression.Call(
+                typeof(Enumerable),
+                nameof(Enumerable.Select),
+                new Type[]
+                {
+                    relatedType,
+                    z_member.Type
+                },
+                ienumerableMember,
+                Expression.Lambda(
+                    z_member,
+                    z_parameter
+                    )
+                );
+
+            var containsCall = Expression.Call(ContainsMethod.MakeGenericMethod(z_member.Type), new Expression[] { selectCall, y_parameter });
+            LambdaExpression allPredicate;
+            if (filter.FilterOperation== FilterOperations.exclude)
+            {
+                allPredicate = Expression.Lambda(Expression.Not(containsCall), y_parameter);
+            }
+            else
+            {
+                allPredicate = Expression.Lambda(containsCall, y_parameter);
+            }
+
+            var allExpression = Expression.Call(
+                typeof(Enumerable),
+                nameof(Enumerable.All),
+                new Type[]
+                {
+                    y_parameter.Type
+                },
+                Expression.Constant(obj),
+                allPredicate
+                );
+
+            return Expression.Lambda(allExpression, x_parameter) as Expression<Func<TSource, bool>>;
+        }
+        static Expression<Func<TSource, bool>> BuildAllPredicate<TSource>(
+            Type relatedType,
+            BaseFilterQuery filter
+            )
+        {
+            var x_parameter = Expression.Parameter(relatedType, "x");
+            var propertyValues = filter.PropertyValue.Split(QueryConstants.COMMA);
+            var member = Expression.Property(x_parameter, filter.Attribute.InternalAttributeName);
+
+            var method = ContainsMethod.MakeGenericMethod(member.Type);
+            var obj = TypeHelper.ConvertListType(propertyValues, member.Type);
+            var tmp_parameter = Expression.Parameter(obj.GetType(), "tmp");
+
+            var selectCall = Expression.Call(
+                typeof(Enumerable),
+                "Select",
+                new Type[]
+                {
+                    member.Type,
+                    typeof(string)
+                },
+                Expression.Lambda(
+                    member,
+                    x_parameter
+                    )
+                );
+
+            if (filter.FilterOperation == FilterOperations.all)
+            {
+                var contains = Expression.Call(method, new Expression[] { Expression.Constant(obj), member });
+                return Expression.Lambda<Func<TSource, bool>>(contains, x_parameter);
+            }
+            return null;
+        }
+        static MethodCallExpression BuildAnyCall(
+            MemberExpression ienumerableMember,
+            Type relatedType,
+            BaseFilterQuery filter
+            )
+        {
+            var minfo = AnyPredicate;
+
+            var predicate = minfo
+                .MakeGenericMethod(relatedType)
+                .Invoke(null, new object[] { relatedType, filter }) as Expression;
+            //var predicate = BuildPredicate<TSource>(relatedType, filter);
+
+            var any = AnyMethod
+                .MakeGenericMethod(relatedType);
+
+            return Expression.Call(
+                null,
+                any,
+                ienumerableMember,
+                predicate);
+        }
+        static Expression<Func<TSource, bool>> BuildAnyPredicate<TSource>(
+            Type relatedType,
+            BaseFilterQuery filter
+            )
+        {
+            var parameter = Expression.Parameter(relatedType, "x");
+
+            if (filter.FilterOperation == FilterOperations.@in || filter.FilterOperation == FilterOperations.nin)
+            {
+                var propertyValues = filter.PropertyValue.Split(QueryConstants.COMMA);
+                var member = Expression.Property(parameter, filter.Attribute.InternalAttributeName);
+
+                var method = ContainsMethod.MakeGenericMethod(member.Type);
+                var obj = TypeHelper.ConvertListType(propertyValues, member.Type);
+
+                if (filter.FilterOperation == FilterOperations.@in)
+                {
+                    // Where(i => arr.Contains(i.column))
+                    var contains = Expression.Call(method, new Expression[] { Expression.Constant(obj), member });
+                    return Expression.Lambda<Func<TSource, bool>>(contains, parameter);
+                }
+                if (filter.FilterOperation == FilterOperations.nin)
+                {
+                    // Where(i => !arr.Contains(i.column))
+                    var notContains = Expression.Not(Expression.Call(method, new Expression[] { Expression.Constant(obj), member }));
+                    return Expression.Lambda<Func<TSource, bool>>(notContains, parameter);
+                }
+
+                return null;
+            }
+            else
+            {
+                var left = Expression.PropertyOrField(parameter, filter.Attribute.InternalAttributeName);
+                ConstantExpression right;
+                if (filter.FilterOperation == FilterOperations.isnotnull || filter.FilterOperation == FilterOperations.isnull)
+                    right = Expression.Constant(null);
+                else
+                {
+                    // convert the incoming value to the target value type
+                    // "1" -> 1
+                    var convertedValue = TypeHelper.ConvertType(filter.PropertyValue, left.Type);
+                    // {1}
+                    right = Expression.Constant(convertedValue, left.Type);
+                }
+                var body = GetFilterExpressionLambda(left, right, filter.FilterOperation);
+                return Expression.Lambda<Func<TSource, bool>>(body, parameter);
             }
         }
 
